@@ -195,6 +195,7 @@ export default function WimHofBreathing() {
   const [roundRetentions, setRoundRetentions] = useState([]);
   const [sessionStart, setSessionStart] = useState(null);
   const [breathingAnim, setBreathingAnim] = useState(false);
+  const [showQuitConfirm, setShowQuitConfirm] = useState(false);
 
   const intervalRef = useRef(null);
   const timeoutRef = useRef(null);
@@ -261,7 +262,7 @@ export default function WimHofBreathing() {
       clearTimers();
       intervalRef.current = setInterval(() => {
         setRetentionTime((t) => {
-          if ((t + 1) % 10 === 0) AudioEngine.tick();
+          if ((t + 1) % 60 === 0) AudioEngine.tick();
           return t + 1;
         });
       }, 1000);
@@ -341,6 +342,7 @@ export default function WimHofBreathing() {
   // ── Reset ──
   const resetToSetup = () => {
     clearTimers();
+    setShowQuitConfirm(false);
     setPhase(PHASE.SETUP);
     setCurrentRound(0);
     setBreathCount(0);
@@ -496,7 +498,7 @@ export default function WimHofBreathing() {
 
       {/* ─── RETENTION PHASE ─── */}
       {phase === PHASE.RETENTION && (
-        <div style={styles.activeContainer} onClick={endRetention}>
+        <div style={styles.activeContainer}>
           <div style={styles.roundIndicator}>
             Round {currentRound} of {rounds} — Retention
           </div>
@@ -656,9 +658,27 @@ export default function WimHofBreathing() {
 
       {/* Cancel button during active session */}
       {[PHASE.BREATHING, PHASE.RETENTION, PHASE.RECOVERY].includes(phase) && (
-        <button style={styles.cancelBtn} onClick={resetToSetup}>
+        <button style={styles.cancelBtn} onClick={() => setShowQuitConfirm(true)}>
           ✕
         </button>
+      )}
+
+      {/* Quit confirmation overlay */}
+      {showQuitConfirm && (
+        <div style={styles.quitOverlay}>
+          <div style={styles.quitCard}>
+            <p style={styles.quitTitle}>Quit session?</p>
+            <p style={styles.quitSub}>Your progress won't be saved.</p>
+            <div style={styles.quitBtns}>
+              <button style={styles.quitConfirmBtn} onClick={resetToSetup}>
+                Quit
+              </button>
+              <button style={styles.quitCancelBtn} onClick={() => setShowQuitConfirm(false)}>
+                Keep going
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       <style>{`
@@ -952,6 +972,64 @@ const styles = {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
+  },
+  quitOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.6)",
+    backdropFilter: "blur(6px)",
+    zIndex: 20,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+  quitCard: {
+    background: "#161d2b",
+    border: "1px solid rgba(255,255,255,0.1)",
+    borderRadius: 20,
+    padding: "32px 28px",
+    maxWidth: 320,
+    width: "100%",
+    textAlign: "center",
+  },
+  quitTitle: {
+    fontFamily: "'Instrument Serif', serif",
+    fontSize: 26,
+    color: "#f1f5f9",
+    marginBottom: 8,
+  },
+  quitSub: {
+    fontSize: 14,
+    color: "#64748b",
+    marginBottom: 28,
+  },
+  quitBtns: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+  },
+  quitConfirmBtn: {
+    padding: "13px 0",
+    fontSize: 15,
+    fontWeight: 600,
+    fontFamily: "'DM Sans', sans-serif",
+    color: "#f87171",
+    background: "rgba(248,113,113,0.1)",
+    border: "1px solid rgba(248,113,113,0.25)",
+    borderRadius: 12,
+    cursor: "pointer",
+  },
+  quitCancelBtn: {
+    padding: "13px 0",
+    fontSize: 15,
+    fontWeight: 600,
+    fontFamily: "'DM Sans', sans-serif",
+    color: "#f1f5f9",
+    background: "rgba(255,255,255,0.06)",
+    border: "1px solid rgba(255,255,255,0.1)",
+    borderRadius: 12,
+    cursor: "pointer",
   },
   roundDoneStats: { textAlign: "center", marginBottom: 24, marginTop: 32 },
   rdStatBig: { display: "flex", flexDirection: "column", alignItems: "center", gap: 4 },
