@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - master
+      - claude/deploy-breathing-app-qry67
   workflow_dispatch:
 
 permissions:
