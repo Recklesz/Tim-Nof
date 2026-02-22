@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 // ─── Audio Engine (Safari-safe) ──────────────────────────────────
 const AudioEngine = (() => {
   let ctx = null;
+  const buffers = { inhale: null, exhale: null };
 
   const getCtx = () => {
     try {
@@ -14,6 +15,34 @@ const AudioEngine = (() => {
     return ctx;
   };
 
+  const loadSample = async (name, path) => {
+    try {
+      const res = await fetch(path);
+      if (!res.ok) return;
+      const arrayBuf = await res.arrayBuffer();
+      const c = getCtx();
+      if (!c) return;
+      buffers[name] = await c.decodeAudioData(arrayBuf);
+    } catch (e) {}
+  };
+
+  const playSample = (name, vol = 1.0) => {
+    const c = getCtx();
+    if (!c || !buffers[name]) return false;
+    try {
+      const src = c.createBufferSource();
+      const gain = c.createGain();
+      src.buffer = buffers[name];
+      gain.gain.setValueAtTime(vol, c.currentTime);
+      src.connect(gain);
+      gain.connect(c.destination);
+      src.start(c.currentTime);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
+
   const unlock = () => {
     try {
       const c = getCtx();
@@ -23,6 +52,9 @@ const AudioEngine = (() => {
       src.buffer = buf;
       src.connect(c.destination);
       src.start(0);
+      const base = import.meta.env.BASE_URL;
+      loadSample("inhale", `${base}audio/inhale.mp3`);
+      loadSample("exhale", `${base}audio/exhale.mp3`);
       return c.state === "suspended" ? c.resume() : Promise.resolve();
     } catch (e) {
       return Promise.resolve();
@@ -33,12 +65,11 @@ const AudioEngine = (() => {
   const playBell = (freq, vol = 0.55, delay = 0) => {
     const c = getCtx();
     if (!c) return;
-    // Bell partials: inharmonic ratios give it a metallic ring character
     const partials = [
-      { ratio: 1,     amp: 1.0,  decay: 2.2 },
-      { ratio: 2.76,  amp: 0.45, decay: 1.6 },
-      { ratio: 5.40,  amp: 0.20, decay: 1.1 },
-      { ratio: 8.93,  amp: 0.08, decay: 0.7 },
+      { ratio: 1,    amp: 1.0,  decay: 2.2 },
+      { ratio: 2.76, amp: 0.45, decay: 1.6 },
+      { ratio: 5.40, amp: 0.20, decay: 1.1 },
+      { ratio: 8.93, amp: 0.08, decay: 0.7 },
     ];
     partials.forEach(({ ratio, amp, decay }) => {
       try {
@@ -56,52 +87,6 @@ const AudioEngine = (() => {
         osc.stop(t + decay);
       } catch (e) {}
     });
-  };
-
-  // Rising glide — guides the inhale (lasts full 1.5 s inhale window)
-  const inhale = () => {
-    const c = getCtx();
-    if (!c) return;
-    try {
-      const t = c.currentTime;
-      const dur = 1.45;
-      const osc = c.createOscillator();
-      const gain = c.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(280, t);
-      osc.frequency.linearRampToValueAtTime(520, t + dur);
-      gain.gain.setValueAtTime(0.0001, t);
-      gain.gain.linearRampToValueAtTime(0.38, t + 0.12);
-      gain.gain.setValueAtTime(0.38, t + dur - 0.18);
-      gain.gain.linearRampToValueAtTime(0.0001, t + dur);
-      osc.connect(gain);
-      gain.connect(c.destination);
-      osc.start(t);
-      osc.stop(t + dur);
-    } catch (e) {}
-  };
-
-  // Falling glide — guides the exhale (lasts full 1.7 s exhale window)
-  const exhale = () => {
-    const c = getCtx();
-    if (!c) return;
-    try {
-      const t = c.currentTime;
-      const dur = 1.65;
-      const osc = c.createOscillator();
-      const gain = c.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(520, t);
-      osc.frequency.linearRampToValueAtTime(260, t + dur);
-      gain.gain.setValueAtTime(0.0001, t);
-      gain.gain.linearRampToValueAtTime(0.30, t + 0.12);
-      gain.gain.setValueAtTime(0.30, t + dur - 0.18);
-      gain.gain.linearRampToValueAtTime(0.0001, t + dur);
-      osc.connect(gain);
-      gain.connect(c.destination);
-      osc.start(t);
-      osc.stop(t + dur);
-    } catch (e) {}
   };
 
   const playTone = (freq, duration, type = "sine", vol = 0.35) => {
@@ -124,19 +109,15 @@ const AudioEngine = (() => {
 
   return {
     unlock,
-    inhale,
-    exhale,
-    // Retention start: deep resonant bell — "you're now holding"
+    inhale: () => playSample("inhale", 0.9),
+    exhale: () => playSample("exhale", 0.8),
     holdStart: () => playBell(432, 0.65),
-    // Recovery start: brighter bell — "breathe in and hold"
     recoveryIn: () => playBell(528, 0.6),
-    // Round complete: ascending bell trio
     roundComplete: () => {
       playBell(440, 0.5, 0);
       playBell(554, 0.45, 0.35);
       playBell(659, 0.4, 0.7);
     },
-    // Session complete: full ascending chime sequence
     sessionComplete: () => {
       [440, 494, 554, 622, 740].forEach((f, i) => playBell(f, 0.4, i * 0.28));
     },
