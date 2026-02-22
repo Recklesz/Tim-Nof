@@ -3,77 +3,145 @@ import { useState, useEffect, useRef, useCallback } from "react";
 // ─── Audio Engine (Safari-safe) ──────────────────────────────────
 const AudioEngine = (() => {
   let ctx = null;
-  let unlocked = false;
+
+  const getCtx = () => {
+    try {
+      if (!ctx || ctx.state === "closed") {
+        ctx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (ctx.state === "suspended") ctx.resume();
+    } catch (e) {}
+    return ctx;
+  };
 
   const unlock = () => {
-    if (unlocked && ctx) return Promise.resolve();
     try {
-      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const c = getCtx();
+      if (!c) return Promise.resolve();
+      const buf = c.createBuffer(1, 1, 22050);
+      const src = c.createBufferSource();
+      src.buffer = buf;
+      src.connect(c.destination);
+      src.start(0);
+      return c.state === "suspended" ? c.resume() : Promise.resolve();
     } catch (e) {
       return Promise.resolve();
     }
-    const buf = ctx.createBuffer(1, 1, 22050);
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    src.connect(ctx.destination);
-    src.start(0);
-    unlocked = true;
-    if (ctx.state === "suspended") {
-      return ctx.resume();
-    }
-    return Promise.resolve();
+  };
+
+  // Bell with harmonics — produces a clear "ding" ring sound
+  const playBell = (freq, vol = 0.55, delay = 0) => {
+    const c = getCtx();
+    if (!c) return;
+    // Bell partials: inharmonic ratios give it a metallic ring character
+    const partials = [
+      { ratio: 1,     amp: 1.0,  decay: 2.2 },
+      { ratio: 2.76,  amp: 0.45, decay: 1.6 },
+      { ratio: 5.40,  amp: 0.20, decay: 1.1 },
+      { ratio: 8.93,  amp: 0.08, decay: 0.7 },
+    ];
+    partials.forEach(({ ratio, amp, decay }) => {
+      try {
+        const t = c.currentTime + delay;
+        const osc = c.createOscillator();
+        const gain = c.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(freq * ratio, t);
+        gain.gain.setValueAtTime(0.0001, t);
+        gain.gain.linearRampToValueAtTime(vol * amp, t + 0.008);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+        osc.connect(gain);
+        gain.connect(c.destination);
+        osc.start(t);
+        osc.stop(t + decay);
+      } catch (e) {}
+    });
+  };
+
+  // Rising glide — guides the inhale (lasts full 1.5 s inhale window)
+  const inhale = () => {
+    const c = getCtx();
+    if (!c) return;
+    try {
+      const t = c.currentTime;
+      const dur = 1.45;
+      const osc = c.createOscillator();
+      const gain = c.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(280, t);
+      osc.frequency.linearRampToValueAtTime(520, t + dur);
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.linearRampToValueAtTime(0.38, t + 0.12);
+      gain.gain.setValueAtTime(0.38, t + dur - 0.18);
+      gain.gain.linearRampToValueAtTime(0.0001, t + dur);
+      osc.connect(gain);
+      gain.connect(c.destination);
+      osc.start(t);
+      osc.stop(t + dur);
+    } catch (e) {}
+  };
+
+  // Falling glide — guides the exhale (lasts full 1.7 s exhale window)
+  const exhale = () => {
+    const c = getCtx();
+    if (!c) return;
+    try {
+      const t = c.currentTime;
+      const dur = 1.65;
+      const osc = c.createOscillator();
+      const gain = c.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(520, t);
+      osc.frequency.linearRampToValueAtTime(260, t + dur);
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.linearRampToValueAtTime(0.30, t + 0.12);
+      gain.gain.setValueAtTime(0.30, t + dur - 0.18);
+      gain.gain.linearRampToValueAtTime(0.0001, t + dur);
+      osc.connect(gain);
+      gain.connect(c.destination);
+      osc.start(t);
+      osc.stop(t + dur);
+    } catch (e) {}
   };
 
   const playTone = (freq, duration, type = "sine", vol = 0.35) => {
-    if (!ctx || ctx.state === "closed") return;
-    if (ctx.state === "suspended") ctx.resume();
+    const c = getCtx();
+    if (!c) return;
     try {
-      const t = ctx.currentTime;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
+      const t = c.currentTime;
+      const osc = c.createOscillator();
+      const gain = c.createGain();
       osc.type = type;
       osc.frequency.setValueAtTime(freq, t);
       gain.gain.setValueAtTime(vol, t);
-      gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(c.destination);
       osc.start(t);
       osc.stop(t + duration);
     } catch (e) {}
   };
 
-  const playChord = (freqs, duration, type = "sine", vol = 0.25) => {
-    freqs.forEach((f) => playTone(f, duration, type, vol / freqs.length + 0.1));
-  };
-
   return {
     unlock,
-    inhale: () => {
-      playTone(396, 0.35, "sine", 0.3);
-      playTone(528, 0.35, "sine", 0.12);
-    },
-    exhale: () => {
-      playTone(285, 0.28, "triangle", 0.2);
-    },
-    holdStart: () => {
-      playChord([528, 639], 0.8, "sine", 0.3);
-    },
-    recoveryIn: () => {
-      playTone(528, 0.5, "sine", 0.3);
-      playTone(741, 0.5, "sine", 0.15);
-    },
+    inhale,
+    exhale,
+    // Retention start: deep resonant bell — "you're now holding"
+    holdStart: () => playBell(432, 0.65),
+    // Recovery start: brighter bell — "breathe in and hold"
+    recoveryIn: () => playBell(528, 0.6),
+    // Round complete: ascending bell trio
     roundComplete: () => {
-      playTone(528, 0.5, "sine", 0.25);
-      setTimeout(() => playTone(639, 0.4, "sine", 0.25), 250);
-      setTimeout(() => playTone(852, 0.6, "sine", 0.25), 500);
+      playBell(440, 0.5, 0);
+      playBell(554, 0.45, 0.35);
+      playBell(659, 0.4, 0.7);
     },
+    // Session complete: full ascending chime sequence
     sessionComplete: () => {
-      [0, 200, 400, 600, 800].forEach((d, i) =>
-        setTimeout(() => playTone(396 + i * 80, 0.6, "sine", 0.2), d)
-      );
+      [440, 494, 554, 622, 740].forEach((f, i) => playBell(f, 0.4, i * 0.28));
     },
-    tick: () => playTone(800, 0.08, "triangle", 0.12),
-    countdownBeep: () => playTone(600, 0.2, "triangle", 0.25),
+    tick: () => playTone(900, 0.07, "triangle", 0.15),
+    countdownBeep: () => playBell(660, 0.4),
   };
 })();
 
