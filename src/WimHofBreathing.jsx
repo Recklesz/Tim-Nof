@@ -227,7 +227,7 @@ const AudioEngine = (() => {
     inhale: () => playSample("inhale", 1.2),
     exhale: () => playSample("exhale", 0.85),
     holdStart: () => playBell(432, 0.65),
-    recoveryIn: () => playBell(528, 0.6),
+    recoveryIn: () => playSample("inhale", 1.35),
     roundComplete: () => {
       playBell(440, 0.5, 0);
       playBell(554, 0.45, 0.35);
@@ -411,21 +411,27 @@ export default function WimHofBreathing() {
 
       timeoutRef.current = setTimeout(() => {
         if (phaseRef.current !== PHASE.BREATHING) return;
-        setIsInhale(false);
-        setBreathingAnim(false);
-        AudioEngine.exhale();
-
         count++;
         setBreathCount(count);
 
         if (count >= breathsPerRound) {
           clearTimers();
-          setTimeout(() => {
+          setIsInhale(true);
+          setBreathingAnim(true);
+          AudioEngine.inhale();
+          timeoutRef.current = setTimeout(() => {
+            if (phaseRef.current !== PHASE.BREATHING) return;
+            setBreathingAnim(false);
             setPhase(PHASE.RETENTION);
             setRetentionTime(0);
             AudioEngine.holdStart();
-          }, 800);
+          }, 850);
+          return;
         }
+
+        setIsInhale(false);
+        setBreathingAnim(false);
+        AudioEngine.exhale();
       }, EXHALE_CUE_DELAY_MS);
     };
 
