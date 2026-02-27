@@ -4,6 +4,12 @@ import { useState, useEffect, useRef, useCallback } from "react";
 const AudioEngine = (() => {
   let ctx = null;
   const buffers = { inhale: null, exhale: null };
+  const mediaElements = { inhale: null, exhale: null };
+  const sampleGains = { inhale: 1, exhale: 1 };
+  let loadPromise = null;
+  let breathVolume = 1;
+  const TARGET_PEAK = 0.82;
+  const MAX_AUTO_GAIN = 10;
 
   const getCtx = () => {
     try {
@@ -15,25 +21,120 @@ const AudioEngine = (() => {
     return ctx;
   };
 
+  const getPeakLevel = (audioBuffer) => {
+    let peak = 0;
+    for (let i = 0; i < audioBuffer.numberOfChannels; i++) {
+      const channelData = audioBuffer.getChannelData(i);
+      for (let j = 0; j < channelData.length; j++) {
+        const value = Math.abs(channelData[j]);
+        if (value > peak) peak = value;
+      }
+    }
+    return peak;
+  };
+
+  const getAutoGain = (audioBuffer) => {
+    const peak = getPeakLevel(audioBuffer);
+    if (peak < 0.0001) return 1;
+    return Math.min(MAX_AUTO_GAIN, TARGET_PEAK / peak);
+  };
+
   const loadSample = async (name, path) => {
     try {
       const res = await fetch(path);
-      if (!res.ok) return;
+      if (!res.ok) return false;
       const arrayBuf = await res.arrayBuffer();
       const c = getCtx();
-      if (!c) return;
-      buffers[name] = await c.decodeAudioData(arrayBuf);
+      if (!c) return false;
+      const decoded = await c.decodeAudioData(arrayBuf);
+      buffers[name] = decoded;
+      sampleGains[name] = getAutoGain(decoded);
+      return true;
     } catch (e) {}
+    return false;
   };
 
-  const playSample = (name, vol = 1.0) => {
+  const createMediaElement = (name, path) => {
+    if (mediaElements[name]) return mediaElements[name];
+    const el = new Audio(path);
+    el.preload = "auto";
+    el.playsInline = true;
+    mediaElements[name] = el;
+    return el;
+  };
+
+  const primeMediaElements = async () => {
+    const names = ["inhale", "exhale"];
+    await Promise.all(
+      names.map(async (name) => {
+        const el = mediaElements[name];
+        if (!el) return;
+        try {
+          el.muted = true;
+          el.volume = 0;
+          await el.play();
+          el.pause();
+          el.currentTime = 0;
+        } catch (e) {}
+        el.muted = false;
+        el.volume = 1;
+      }),
+    );
+  };
+
+  const playMediaSample = (name, vol = 1.0, onRejected) => {
+    const el = mediaElements[name];
+    if (!el) return false;
+    try {
+      el.pause();
+      el.currentTime = 0;
+      const adjustedVol = vol * breathVolume * (sampleGains[name] || 1);
+      el.volume = Math.min(1, Math.max(0, adjustedVol));
+      const playPromise = el.play();
+      if (playPromise && typeof playPromise.catch === "function") {
+        playPromise.catch(() => {
+          if (onRejected) onRejected();
+        });
+      }
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  const shouldPreferMediaPlayback = () => {
+    if (typeof navigator === "undefined") return false;
+    const ua = navigator.userAgent || "";
+    const iOSDevice = /iPad|iPhone|iPod/.test(ua);
+    const iPadOSDesktopUA = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+    return iOSDevice || iPadOSDesktopUA;
+  };
+
+  const ensureSamplesLoaded = async () => {
+    const base = import.meta.env.BASE_URL;
+    createMediaElement("inhale", `${base}audio/inhale.mp3`);
+    createMediaElement("exhale", `${base}audio/exhale.mp3`);
+    if (buffers.inhale && buffers.exhale) return;
+    if (!loadPromise) {
+      loadPromise = Promise.all([
+        loadSample("inhale", `${base}audio/inhale.mp3`),
+        loadSample("exhale", `${base}audio/exhale.mp3`),
+      ]).finally(() => {
+        if (!buffers.inhale || !buffers.exhale) loadPromise = null;
+      });
+    }
+    await loadPromise;
+  };
+
+  const playWebAudioSample = (name, vol = 1.0) => {
     const c = getCtx();
     if (!c || !buffers[name]) return false;
     try {
       const src = c.createBufferSource();
       const gain = c.createGain();
       src.buffer = buffers[name];
-      gain.gain.setValueAtTime(vol, c.currentTime);
+      const adjustedVol = Math.min(vol * breathVolume * (sampleGains[name] || 1), MAX_AUTO_GAIN);
+      gain.gain.setValueAtTime(adjustedVol, c.currentTime);
       src.connect(gain);
       gain.connect(c.destination);
       src.start(c.currentTime);
@@ -43,21 +144,32 @@ const AudioEngine = (() => {
     }
   };
 
-  const unlock = () => {
+  const playSample = (name, vol = 1.0) => {
+    if (shouldPreferMediaPlayback()) {
+      const mediaStarted = playMediaSample(name, vol, () => {
+        playWebAudioSample(name, vol);
+      });
+      if (mediaStarted) return true;
+      return playWebAudioSample(name, vol);
+    }
+    if (playWebAudioSample(name, vol)) return true;
+    return playMediaSample(name, vol);
+  };
+
+  const unlock = async () => {
     try {
       const c = getCtx();
-      if (!c) return Promise.resolve();
+      if (!c) return;
       const buf = c.createBuffer(1, 1, 22050);
       const src = c.createBufferSource();
       src.buffer = buf;
       src.connect(c.destination);
       src.start(0);
-      const base = import.meta.env.BASE_URL;
-      loadSample("inhale", `${base}audio/inhale.mp3`);
-      loadSample("exhale", `${base}audio/exhale.mp3`);
-      return c.state === "suspended" ? c.resume() : Promise.resolve();
+      if (c.state === "suspended") await c.resume();
+      await ensureSamplesLoaded();
+      await primeMediaElements();
     } catch (e) {
-      return Promise.resolve();
+      return;
     }
   };
 
@@ -109,8 +221,11 @@ const AudioEngine = (() => {
 
   return {
     unlock,
-    inhale: () => playSample("inhale", 0.9),
-    exhale: () => playSample("exhale", 0.8),
+    setBreathVolume: (value) => {
+      breathVolume = Math.min(2.4, Math.max(0.25, value));
+    },
+    inhale: () => playSample("inhale", 1.2),
+    exhale: () => playSample("exhale", 0.85),
     holdStart: () => playBell(432, 0.65),
     recoveryIn: () => playBell(528, 0.6),
     roundComplete: () => {
@@ -173,6 +288,10 @@ const PHASE = {
   COMPLETE: "complete",
 };
 
+const ACTIVE_PHASES = [PHASE.BREATHING, PHASE.RETENTION, PHASE.RECOVERY];
+const BREATH_CYCLE_MS = 4000;
+const EXHALE_CUE_DELAY_MS = 2000;
+
 // ─── Formatters ──────────────────────────────────────────────────
 const fmtTime = (s) => {
   const m = Math.floor(s / 60);
@@ -196,11 +315,15 @@ export default function WimHofBreathing() {
   const [sessionStart, setSessionStart] = useState(null);
   const [breathingAnim, setBreathingAnim] = useState(false);
   const [showQuitConfirm, setShowQuitConfirm] = useState(false);
+  const [breathVolume, setBreathVolume] = useState(1);
+  const [showVolumeControl, setShowVolumeControl] = useState(false);
 
   const intervalRef = useRef(null);
   const timeoutRef = useRef(null);
   const phaseRef = useRef(phase);
+  const wakeLockRef = useRef(null);
   phaseRef.current = phase;
+  const isActiveSession = ACTIVE_PHASES.includes(phase);
 
   useEffect(() => {
     loadData().then((d) => {
@@ -208,6 +331,60 @@ export default function WimHofBreathing() {
       setLoaded(true);
     });
   }, []);
+
+  useEffect(() => {
+    AudioEngine.setBreathVolume(breathVolume);
+  }, [breathVolume]);
+
+  useEffect(() => {
+    if (!isActiveSession) {
+      setShowVolumeControl(false);
+    }
+  }, [isActiveSession]);
+
+  const requestWakeLock = useCallback(async () => {
+    try {
+      if (typeof navigator === "undefined" || !("wakeLock" in navigator)) return;
+      if (wakeLockRef.current) return;
+      wakeLockRef.current = await navigator.wakeLock.request("screen");
+      wakeLockRef.current.addEventListener("release", () => {
+        wakeLockRef.current = null;
+      });
+    } catch (e) {}
+  }, []);
+
+  const releaseWakeLock = useCallback(async () => {
+    try {
+      if (!wakeLockRef.current) return;
+      await wakeLockRef.current.release();
+      wakeLockRef.current = null;
+    } catch (e) {
+      wakeLockRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isActiveSession) requestWakeLock();
+    else releaseWakeLock();
+  }, [isActiveSession, requestWakeLock, releaseWakeLock]);
+
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible" && isActiveSession) {
+        requestWakeLock();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [isActiveSession, requestWakeLock]);
+
+  useEffect(() => {
+    return () => {
+      releaseWakeLock();
+    };
+  }, [releaseWakeLock]);
 
   const clearTimers = useCallback(() => {
     if (intervalRef.current) clearInterval(intervalRef.current);
@@ -249,11 +426,11 @@ export default function WimHofBreathing() {
             AudioEngine.holdStart();
           }, 800);
         }
-      }, 1500);
+      }, EXHALE_CUE_DELAY_MS);
     };
 
     setTimeout(breathCycle, 300);
-    intervalRef.current = setInterval(breathCycle, 3200);
+    intervalRef.current = setInterval(breathCycle, BREATH_CYCLE_MS);
   }, [breathsPerRound, clearTimers]);
 
   // ── Retention timer ──
@@ -657,10 +834,45 @@ export default function WimHofBreathing() {
       )}
 
       {/* Cancel button during active session */}
-      {[PHASE.BREATHING, PHASE.RETENTION, PHASE.RECOVERY].includes(phase) && (
+      {isActiveSession && (
         <button style={styles.cancelBtn} onClick={() => setShowQuitConfirm(true)}>
           ✕
         </button>
+      )}
+
+      {isActiveSession && (
+        <div
+          style={{
+            ...styles.volumeDock,
+            ...(showVolumeControl ? styles.volumeDockOpen : null),
+          }}
+        >
+          <button
+            style={styles.volumeHandle}
+            onClick={() => setShowVolumeControl((v) => !v)}
+            aria-label={showVolumeControl ? "Hide breath volume" : "Show breath volume"}
+          >
+            <span style={styles.volumeHandleText}>breath sound</span>
+            <span style={styles.volumeHandleValue}>{Math.round(breathVolume * 100)}%</span>
+          </button>
+          <div
+            style={{
+              ...styles.volumePanel,
+              ...(showVolumeControl ? styles.volumePanelOpen : styles.volumePanelClosed),
+            }}
+          >
+            <input
+              style={styles.volumeSlider}
+              type="range"
+              min="0.25"
+              max="2.4"
+              step="0.05"
+              value={breathVolume}
+              onChange={(e) => setBreathVolume(Number(e.target.value))}
+              aria-label="Breath sound level"
+            />
+          </div>
+        </div>
       )}
 
       {/* Quit confirmation overlay */}
@@ -972,6 +1184,72 @@ const styles = {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
+  },
+  volumeDock: {
+    position: "fixed",
+    left: "50%",
+    bottom: 14,
+    transform: "translate(-50%, 22px)",
+    zIndex: 12,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    opacity: 0.45,
+    transition: "transform 360ms cubic-bezier(0.2, 1.2, 0.28, 1), opacity 200ms ease",
+  },
+  volumeDockOpen: {
+    transform: "translate(-50%, 0)",
+    opacity: 0.96,
+  },
+  volumeHandle: {
+    border: "1px solid rgba(255,255,255,0.16)",
+    background: "rgba(8,12,20,0.62)",
+    borderRadius: 999,
+    color: "#b7c2d8",
+    height: 28,
+    padding: "0 12px",
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    cursor: "pointer",
+    backdropFilter: "blur(8px)",
+  },
+  volumeHandleText: {
+    fontSize: 10,
+    textTransform: "uppercase",
+    letterSpacing: "0.14em",
+  },
+  volumeHandleValue: {
+    fontFamily: "'Instrument Serif', serif",
+    fontSize: 13,
+    color: "#d5e4ff",
+  },
+  volumePanel: {
+    marginTop: 8,
+    width: 210,
+    padding: "8px 14px 10px",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(8,12,20,0.8)",
+    backdropFilter: "blur(10px)",
+    transform: "scale(0.94)",
+    transformOrigin: "bottom center",
+    transition: "transform 280ms cubic-bezier(0.2, 1.22, 0.38, 1)",
+  },
+  volumePanelOpen: {
+    opacity: 1,
+    transform: "scale(1)",
+    pointerEvents: "auto",
+  },
+  volumePanelClosed: {
+    opacity: 0,
+    transform: "scale(0.88)",
+    pointerEvents: "none",
+  },
+  volumeSlider: {
+    width: "100%",
+    accentColor: "#91c6ff",
+    cursor: "pointer",
   },
   quitOverlay: {
     position: "fixed",
